@@ -737,6 +737,10 @@ void setup() {
   status = (WiFi.status() == WL_CONNECTED)
              ? String("ready  ") + WiFi.localIP().toString()
              : String("wifi FAILED");
+  if (WiFi.status() == WL_CONNECTED) {         // start a fresh conversation each boot
+    HTTPClient h; h.begin(String(SERVER_BASE) + "/reset"); h.setTimeout(5000);
+    h.GET(); h.end();
+  }
   replyText = "Tap the button and talk to me!";
   drawUI();
 }

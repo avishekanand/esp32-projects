@@ -13,7 +13,7 @@ No third-party Python deps (stdlib only).
 Run:  python3 server/stt_server.py           (binds 0.0.0.0:8080)
       PORT=9000 python3 server/stt_server.py
 """
-import json, os, re, struct, subprocess, sys, tempfile, time, urllib.request
+import json, os, re, struct, subprocess, sys, tempfile, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE      = os.path.dirname(os.path.abspath(__file__))
@@ -87,10 +87,7 @@ def transcribe(audio: bytes, rate: int = SAMPLE_RATE) -> str:
 def chat(user_text: str) -> str:
     payload = {
         "model": CHAT_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
+        "messages": build_messages(user_text),
         "stream": False,
         "keep_alive": "30m",
         "options": {"temperature": 0.7, "num_predict": 512},
@@ -101,9 +98,8 @@ def chat(user_text: str) -> str:
     with urllib.request.urlopen(req, timeout=60) as r:
         d = json.loads(r.read())
     reply = (d.get("message", {}).get("content", "") or "").strip()
-    # Strip emoji / non-ASCII so it renders on the ASCII-font display (and TTS later).
-    reply = reply.encode("ascii", "ignore").decode("ascii")
-    reply = re.sub(r"[ \t]+", " ", reply).strip()
+    reply = _clean_ascii(reply)
+    remember(user_text, reply)
     return reply
 
 
@@ -141,12 +137,35 @@ def _clean_ascii(s: str) -> str:
     s = s.encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[ \t]+", " ", s).strip()
 
-def ollama_stream(user_text: str):
-    """Yield LLM reply text deltas from Ollama (streaming)."""
+# --- Conversation memory (shared by /chat and /converse) ---
+CONV_LOCK = threading.Lock()
+conversation = []                 # [{role:'user'|'assistant', content:str}, ...]
+MAX_MESSAGES = int(os.environ.get("MAX_HISTORY", "16"))   # keep last N (~8 turns)
+
+def build_messages(user_text: str) -> list:
+    with CONV_LOCK:
+        hist = list(conversation)
+    return [{"role": "system", "content": SYSTEM_PROMPT}] + hist + \
+           [{"role": "user", "content": user_text}]
+
+def remember(user_text: str, assistant_text: str):
+    if not assistant_text:
+        return
+    with CONV_LOCK:
+        conversation.append({"role": "user", "content": user_text})
+        conversation.append({"role": "assistant", "content": assistant_text})
+        if len(conversation) > MAX_MESSAGES:
+            conversation[:] = conversation[-MAX_MESSAGES:]
+
+def reset_conversation():
+    with CONV_LOCK:
+        conversation.clear()
+
+def ollama_stream(messages: list):
+    """Yield LLM reply text deltas from Ollama (streaming) for a messages list."""
     payload = {
         "model": CHAT_MODEL,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                     {"role": "user", "content": user_text}],
+        "messages": messages,
         "stream": True,
         "keep_alive": "30m",
         "options": {"temperature": 0.7, "num_predict": 512},
@@ -183,6 +202,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
+            self._send(200, b"ok", "text/plain")
+        elif self.path == "/reset":
+            reset_conversation()
+            sys.stderr.write("[conv] history reset\n")
             self._send(200, b"ok", "text/plain")
         else:
             self._send(404, b'{"error":"not found"}')
@@ -236,9 +259,9 @@ class Handler(BaseHTTPRequestHandler):
             return frame(b"A", pcm)
 
         try:
-            buf = ""; n = 0
-            for chunk in ollama_stream(text):
-                buf += chunk
+            buf = ""; n = 0; full = ""
+            for chunk in ollama_stream(build_messages(text)):
+                buf += chunk; full += chunk
                 while True:
                     i = _next_boundary(buf)
                     if i < 0:
@@ -250,7 +273,10 @@ class Handler(BaseHTTPRequestHandler):
                         n += 1
             if _clean_ascii(buf):
                 emit(buf); n += 1
-            sys.stderr.write(f"[converse] -> {n} sentence(s) done\n")
+            remember(text, _clean_ascii(full))        # store the turn for context
+            with CONV_LOCK:
+                turns = len(conversation) // 2
+            sys.stderr.write(f"[converse] -> {n} sentence(s) done; history={turns} turns\n")
         except Exception as e:
             sys.stderr.write(f"[converse] ERROR {e}\n")
 
