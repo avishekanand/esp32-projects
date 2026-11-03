@@ -1,0 +1,29 @@
+# === Secrets — never commit real credentials ===
+wifi_secrets.h
+**/wifi_secrets.h
+secrets.h
+**/secrets.h
+*.secret
+
+# === Large model files (fetch via scripts/download_models.sh) ===
+*.onnx
+models/*.bin
+models/*.onnx
+
+# === Firmware flash dumps / backups (device-specific, large) ===
+backup/
+*.elf
+
+# === Python virtualenvs ===
+*-venv/
+server/tts-venv/
+esp-venv/
+__pycache__/
+*.pyc
+
+# === Arduino / build output ===
+build/
+
+# === Editor / OS cruft ===
+.DS_Store
+.claude/
