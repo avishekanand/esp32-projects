@@ -295,9 +295,9 @@ void touchInit() {
 #define I2S_WS   21
 #define I2S_DOUT 15
 #define I2S_DIN  16
-static const int SR = 16000;            // 16 kHz
+static const int SR = 24000;            // 24 kHz (full Kokoro fidelity; mic + speaker)
 static const int MAX_SEC = 10;          // cap recording length
-static const size_t MAX_PCM = (size_t)SR * 2 * MAX_SEC;  // mono int16 bytes
+static const size_t MAX_PCM = (size_t)SR * 2 * MAX_SEC;  // mono int16 bytes (~480KB)
 
 // ---- UI geometry ----
 static const int BTN_X = 40, BTN_Y = 340, BTN_W = 240, BTN_H = 100;  // mults of 4
@@ -520,6 +520,7 @@ String postAudio() {
   HTTPClient http;
   http.begin(SERVER_STT);
   http.addHeader("Content-Type", "application/octet-stream");
+  http.addHeader("X-Rate", String(SR));        // tell server the mic sample rate
   http.setTimeout(30000);
   int code = http.POST(pcm, pcmLen);
   String body = (code > 0) ? http.getString() : String();
@@ -697,7 +698,7 @@ void setup() {
   cfg.input_device  = ADC_INPUT_ALL;
   cfg.output_device = DAC_OUTPUT_ALL;
   cfg.i2s.bits = BIT_LENGTH_16BITS;
-  cfg.i2s.rate = RATE_16K;
+  cfg.i2s.rate = RATE_24K;               // 24 kHz codec clocking
   if (!codec.begin(cfg)) Serial.println("WARN: ES8311 init failed");
   codec.setInputVolume(75);     // mic gain
   codec.setVolume(50);          // speaker/DAC volume (calibrated level)

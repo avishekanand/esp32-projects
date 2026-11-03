@@ -152,10 +152,11 @@ you stop, and keeps talking while the rest generates.
   Kokoro neural TTS (natural voice; `say` fallback).
 
 ### 🔭 Roadmap
-- **Latency (in progress):** stream the pipeline — sentence‑chunked TTS so Pip starts
-  talking ~1 s after you stop; keep whisper resident (no per‑turn reload); move the LLM to
-  MLX + a 3B model. Target < 1 s to first audio.
-- **Fidelity:** bump device playback 16 kHz → 24 kHz for full‑quality Kokoro audio.
+- ✅ **Streaming** `/converse` (sentence‑chunked) — ~1.2–1.5 s to first audio.
+- ✅ **Resident Whisper** (whisper‑server) — no per‑turn model reload.
+- ✅ **24 kHz audio** end‑to‑end — full‑fidelity Kokoro playback (mic + speaker at 24 kHz).
+- **LLM speedup (evaluating):** move the LLM to Apple **MLX** + a 3B model for faster
+  first token vs the current warm Ollama `qwen2.5:7b`.
 - **Later:** point the device at a dedicated home server; conversation memory; wake word;
   LVGL UI polish; the physical crocheted‑dog enclosure.
 

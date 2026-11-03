@@ -28,7 +28,7 @@ OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "qwen2.5:7b")
 # TTS (/tts) via macOS `say` -> raw PCM16 mono at TTS_RATE
 TTS_VOICE = os.environ.get("TTS_VOICE", "Superstar")
-TTS_RATE  = int(os.environ.get("TTS_RATE", "16000"))
+TTS_RATE  = int(os.environ.get("TTS_RATE", "24000"))   # device plays at 24k (full Kokoro fidelity)
 
 SYSTEM_PROMPT = (
     "You are Pip, a hyper-enthusiastic robot dog who lives inside a little radio. "
@@ -76,8 +76,8 @@ def _whisper_cli(wav: bytes) -> str:
     finally:
         os.unlink(path)
 
-def transcribe(audio: bytes) -> str:
-    wav = audio if audio[:4] == b"RIFF" else pcm_to_wav(audio)
+def transcribe(audio: bytes, rate: int = SAMPLE_RATE) -> str:
+    wav = audio if audio[:4] == b"RIFF" else pcm_to_wav(audio, rate)
     try:
         return _whisper_server(wav)
     except Exception as e:
@@ -273,12 +273,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, json.dumps({"error": str(e)}).encode())
 
     def _handle_stt(self, audio: bytes):
-        secs = (len(audio) / 2) / SAMPLE_RATE if audio[:4] != b"RIFF" else -1
-        sys.stderr.write(f"[stt] {len(audio)} bytes (~{secs:.1f}s pcm)\n")
+        rate = int(self.headers.get("X-Rate", str(SAMPLE_RATE)))
+        secs = (len(audio) / 2) / rate if audio[:4] != b"RIFF" else -1
+        sys.stderr.write(f"[stt] {len(audio)} bytes (~{secs:.1f}s pcm @ {rate}Hz)\n")
         if len(audio) < 100:
             self._send(400, b'{"error":"empty audio"}'); return
         try:
-            text = transcribe(audio)
+            text = transcribe(audio, rate)
             sys.stderr.write(f"[stt] -> {text!r}\n")
             self._send(200, json.dumps({"text": text}).encode())
         except Exception as e:
