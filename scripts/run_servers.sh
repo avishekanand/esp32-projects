@@ -21,9 +21,9 @@ whisper-server -m "$ROOT/models/ggml-base.en.bin" --host 127.0.0.1 --port 8082 -
 echo "[2/3] kokoro_tts (TTS) :8081"
 "$ROOT/server/tts-venv/bin/python" "$ROOT/server/kokoro_tts.py" >/tmp/kokoro.log 2>&1 &
 
-echo "   warming Ollama (qwen2.5:7b)..."
+echo "   warming Ollama (qwen2.5:3b)..."
 curl -s --max-time 60 http://127.0.0.1:11434/api/generate \
-  -d '{"model":"qwen2.5:7b","prompt":"hi","stream":false,"keep_alive":"30m"}' >/dev/null 2>&1 || true
+  -d '{"model":"qwen2.5:3b","prompt":"hi","stream":false,"keep_alive":"30m"}' >/dev/null 2>&1 || true
 
 # wait for Kokoro to finish loading its model (cold load can take several seconds)
 printf "   waiting for Kokoro to load"
