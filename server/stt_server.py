@@ -25,7 +25,7 @@ SAMPLE_RATE = 16000
 
 # Ollama (local LLM) for /chat
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-CHAT_MODEL = os.environ.get("CHAT_MODEL", "qwen2.5:7b")
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "qwen2.5:3b")   # 3B ~2x faster than 7b; set CHAT_MODEL=qwen2.5:7b for more wit
 # TTS (/tts) via macOS `say` -> raw PCM16 mono at TTS_RATE
 TTS_VOICE = os.environ.get("TTS_VOICE", "Superstar")
 TTS_RATE  = int(os.environ.get("TTS_RATE", "24000"))   # device plays at 24k (full Kokoro fidelity)
