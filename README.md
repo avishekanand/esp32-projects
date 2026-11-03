@@ -117,10 +117,21 @@ scripts/download_models.sh                   # whisper + Kokoro model files
 python3.12 -m venv server/tts-venv
 server/tts-venv/bin/pip install kokoro-onnx soxr soundfile
 
-# Run BOTH (two terminals):
-server/tts-venv/bin/python server/kokoro_tts.py          # localhost:8081 (neural TTS)
-/usr/bin/python3 server/stt_server.py                    # 0.0.0.0:8080 (LAN)
+# Start everything (whisper-server :8082, Kokoro :8081, gateway :8080):
+scripts/run_servers.sh
 ```
+
+Three local services make up the brain:
+
+| Service | Port | Runtime | Role |
+|---|---|---|---|
+| `whisper-server` | 8082 (loopback) | homebrew whisper‑cpp | STT, model resident on the GPU |
+| `kokoro_tts.py` | 8081 (loopback) | `server/tts-venv` python | neural TTS, model warm |
+| `stt_server.py` | 8080 (**LAN**) | Apple‑signed `/usr/bin/python3` | gateway: `/stt` `/chat` `/tts` `/converse` |
+
+The device uses **`/converse`**, which streams the LLM sentence‑by‑sentence and returns
+framed `[type][len][payload]` chunks (text + audio) so Pip starts speaking ~1.2–1.5 s after
+you stop, and keeps talking while the rest generates.
 
 > **macOS firewall gotcha:** the LAN‑facing server must run under Apple‑signed
 > `/usr/bin/python3`. Homebrew Python is ad‑hoc signed and macOS silently resets its

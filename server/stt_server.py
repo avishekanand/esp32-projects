@@ -47,22 +47,42 @@ def pcm_to_wav(pcm: bytes, rate=SAMPLE_RATE, ch=1, bits=16) -> bytes:
             + b"fmt " + struct.pack("<IHHIIHH", 16, 1, ch, rate, byte_rate, block_align, bits)
             + b"data" + struct.pack("<I", len(pcm)) + pcm)
 
-def transcribe(audio: bytes) -> str:
-    is_wav = audio[:4] == b"RIFF"
-    wav = audio if is_wav else pcm_to_wav(audio)
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://127.0.0.1:8082/inference")
+
+def _whisper_server(wav: bytes) -> str:
+    """Transcribe via the resident whisper-server (model stays warm on the GPU)."""
+    boundary = "----stt" + os.urandom(8).hex()
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n").encode() + wav + \
+           (f"\r\n--{boundary}\r\nContent-Disposition: form-data; "
+            f"name=\"response_format\"\r\n\r\njson\r\n--{boundary}--\r\n").encode()
+    req = urllib.request.Request(
+        WHISPER_URL, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        d = json.loads(r.read())
+    return re.sub(r"\s+", " ", d.get("text", "")).strip()
+
+def _whisper_cli(wav: bytes) -> str:
+    """Fallback: spawn whisper-cli (reloads the model each call)."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         f.write(wav); path = f.name
     try:
-        out = subprocess.run(
-            [WHISPER, "-m", MODEL, "-f", path, "-nt", "-np"],
-            capture_output=True, text=True, timeout=120)
+        out = subprocess.run([WHISPER, "-m", MODEL, "-f", path, "-nt", "-np"],
+                             capture_output=True, text=True, timeout=120)
         if out.returncode != 0:
             raise RuntimeError(out.stderr.strip()[:500] or "whisper-cli failed")
-        text = out.stdout.strip()
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+        return re.sub(r"\s+", " ", out.stdout.strip()).strip()
     finally:
         os.unlink(path)
+
+def transcribe(audio: bytes) -> str:
+    wav = audio if audio[:4] == b"RIFF" else pcm_to_wav(audio)
+    try:
+        return _whisper_server(wav)
+    except Exception as e:
+        sys.stderr.write(f"[stt] whisper-server unavailable ({e}); falling back to whisper-cli\n")
+        return _whisper_cli(wav)
 
 def chat(user_text: str) -> str:
     payload = {
