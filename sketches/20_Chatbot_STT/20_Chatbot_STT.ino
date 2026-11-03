@@ -301,6 +301,7 @@ static const size_t MAX_PCM = (size_t)SR * 2 * MAX_SEC;  // mono int16 bytes (~4
 
 // ---- UI geometry ----
 static const int BTN_X = 40, BTN_Y = 340, BTN_W = 240, BTN_H = 100;  // mults of 4
+static const int NB_X = 232, NB_Y = 16, NB_W = 76, NB_H = 36;        // "New" (reset) button
 
 AudioBoard codec(AudioDriverES8311, NoPins);
 I2SClass   i2s;
@@ -336,6 +337,9 @@ String   g_lines[MAX_WRAP_LINES];
 // ---------- helpers ----------
 static bool inButton(uint16_t x, uint16_t y) {
   return x >= BTN_X && x < BTN_X + BTN_W && y >= BTN_Y && y < BTN_Y + BTN_H;
+}
+static bool inNewBtn(uint16_t x, uint16_t y) {
+  return x >= NB_X && x < NB_X + NB_W && y >= NB_Y && y < NB_Y + NB_H;
 }
 
 // Word-wrap `txt` into g_lines[] at `maxChars` per line; returns line count.
@@ -397,6 +401,13 @@ void drawUI() {
   gfx->setTextSize(3);
   gfx->setCursor(20, 24);
   gfx->println("Chatbot Dog");
+
+  // "New" (reset conversation) button
+  gfx->drawRoundRect(NB_X, NB_Y, NB_W, NB_H, 8, RGB565_DARKGREY);
+  gfx->setTextColor(RGB565_DARKGREY);
+  gfx->setTextSize(2);
+  gfx->setCursor(NB_X + 10, NB_Y + 11);
+  gfx->print("New");
 
   // Status line
   gfx->setTextColor(RGB565_YELLOW);
@@ -461,6 +472,24 @@ void drawUI() {
 
 // Sample the touch panel once per loop into shared globals.
 void pollTouch() { g_touchDown = touchRead(&g_tx, &g_ty); }
+
+// Edge-detected tap on the "New" button.
+bool newChatTapped() {
+  static bool wasDown = false;
+  bool tap = (g_touchDown && !wasDown && inNewBtn(g_tx, g_ty));
+  wasDown = g_touchDown;
+  return tap;
+}
+
+// Clear the server conversation history and reset the UI to a fresh start.
+void resetConversation() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient h; h.begin(String(SERVER_BASE) + "/reset"); h.setTimeout(5000);
+    h.GET(); h.end();
+  }
+  userText = ""; replyText = "Fresh start! What's on your mind?";
+  replyScroll = 0; haveTiming = false;
+}
 
 // Edge-detected tap inside the button. Returns true once per press.
 bool buttonTapped() {
@@ -753,6 +782,13 @@ static String readyStatus() {
 
 void loop() {
   pollTouch();
+  bool newTap = newChatTapped();                // call every loop to keep edge state
+  if (newTap && (state == ST_IDLE || state == ST_RESULT)) {
+    resetConversation();
+    status = readyStatus();
+    drawUI();
+    return;
+  }
   switch (state) {
     case ST_IDLE:
       if (buttonTapped()) {
