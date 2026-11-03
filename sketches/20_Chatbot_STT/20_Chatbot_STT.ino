@@ -315,6 +315,10 @@ String   replyText = "";         // last LLM reply
 String   status    = "connecting wifi...";
 int      replyScroll  = 0;       // Pip box scroll offset (in lines)
 int      g_replyLines = 0;       // total wrapped lines of current reply
+// --- timing (measured from when you stop talking) ---
+unsigned long tStopRec = 0;      // millis() when recording stopped
+float    tSttS = 0, tFirstS = 0, tTotalS = 0;   // stt, time-to-first-audio, total (s)
+bool     haveTiming = false;
 bool     g_touchDown  = false;   // shared per-loop touch sample
 uint16_t g_tx = 0, g_ty = 0;
 
@@ -440,6 +444,17 @@ void drawUI() {
   int16_t tx = BTN_X + 20, ty = BTN_Y + 36;
   gfx->setCursor(tx, ty);
   gfx->println(label);
+
+  // Timing readout (measured from when you stop talking)
+  if (haveTiming) {
+    char tbuf[64];
+    snprintf(tbuf, sizeof(tbuf), "stt %.1fs  voice %.1fs  total %.1fs",
+             tSttS, tFirstS, tTotalS);
+    gfx->setTextSize(1);
+    gfx->setTextColor(RGB565_DARKGREY);
+    gfx->setCursor(20, 452);
+    gfx->print(tbuf);
+  }
 
   gfx->flush();
 }
@@ -642,7 +657,7 @@ void converseStream(const String &text) {
   if (code != 200) { replyText = String("(server ") + code + ")"; http.end(); drawUI(); return; }
 
   WiFiClient *st = http.getStreamPtr();
-  replyText = ""; replyScroll = 9999;
+  replyText = ""; replyScroll = 9999; tFirstS = 0;
   digitalWrite(AMP_ENABLE, LOW);               // amp ON for the whole turn
   while (true) {
     uint8_t hb[5];
@@ -662,6 +677,8 @@ void converseStream(const String &text) {
       if (replyText.length()) replyText += " ";
       replyText += s; replyScroll = 9999; drawUI();
     } else if (hb[0] == 'A') {                  // sentence audio -> play it
+      if (tFirstS == 0)                         // first audio of this turn
+        tFirstS = (millis() - tStopRec) / 1000.0f;
       if (!playPcm(st, len)) break;
     } else {                                    // unknown frame -> skip
       uint8_t junk[256]; uint32_t got = 0;
@@ -672,6 +689,8 @@ void converseStream(const String &text) {
   delay(40);
   digitalWrite(AMP_ENABLE, HIGH);              // amp OFF
   http.end();
+  tTotalS = (millis() - tStopRec) / 1000.0f;    // full round-trip from stop-talking
+  haveTiming = true;
   int maxScroll = g_replyLines > PIP_VISIBLE ? g_replyLines - PIP_VISIBLE : 0;
   replyScroll = maxScroll;                      // leave scrolled to the end
 }
@@ -746,6 +765,7 @@ void loop() {
       if (millis() - lastDraw > 100) { drawUI(); lastDraw = millis(); }
       if (buttonTapped() || pcmLen >= MAX_PCM) {
         state = ST_UPLOADING;
+        tStopRec = millis(); haveTiming = false;   // start the round-trip clock
         status = (pcmLen >= MAX_PCM) ? "max 10s, transcribing..." : "transcribing...";
         level = 0;
         drawUI();
@@ -753,8 +773,10 @@ void loop() {
       break;
     }
 
-    case ST_UPLOADING:
+    case ST_UPLOADING: {
+      unsigned long a = millis();
       userText = postAudio();
+      tSttS = (millis() - a) / 1000.0f;                 // transcription time
       if (userText.length() && userText[0] != '(') {   // valid transcription
         status = "Pip is thinking...";
         replyText = "";
@@ -767,6 +789,7 @@ void loop() {
         drawUI();
       }
       break;
+    }
 
     case ST_CONVERSE:
       converseStream(userText);                  // streams sentences: show + speak
