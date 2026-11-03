@@ -13,7 +13,7 @@ No third-party Python deps (stdlib only).
 Run:  python3 server/stt_server.py           (binds 0.0.0.0:8080)
       PORT=9000 python3 server/stt_server.py
 """
-import json, os, re, struct, subprocess, sys, tempfile, urllib.request
+import json, os, re, struct, subprocess, sys, tempfile, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE      = os.path.dirname(os.path.abspath(__file__))
@@ -72,6 +72,7 @@ def chat(user_text: str) -> str:
             {"role": "user", "content": user_text},
         ],
         "stream": False,
+        "keep_alive": "30m",
         "options": {"temperature": 0.7, "num_predict": 512},
     }
     req = urllib.request.Request(
@@ -116,6 +117,42 @@ def tts(text: str) -> bytes:
         return tts_say(text)
 
 
+def _clean_ascii(s: str) -> str:
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[ \t]+", " ", s).strip()
+
+def ollama_stream(user_text: str):
+    """Yield LLM reply text deltas from Ollama (streaming)."""
+    payload = {
+        "model": CHAT_MODEL,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                     {"role": "user", "content": user_text}],
+        "stream": True,
+        "keep_alive": "30m",
+        "options": {"temperature": 0.7, "num_predict": 512},
+    }
+    req = urllib.request.Request(
+        OLLAMA_URL, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req, timeout=120)
+    for line in resp:
+        line = line.strip()
+        if not line:
+            continue
+        d = json.loads(line)
+        chunk = d.get("message", {}).get("content", "")
+        if chunk:
+            yield chunk
+        if d.get("done"):
+            break
+
+def _next_boundary(buf: str) -> int:
+    for i, c in enumerate(buf):
+        if c in ".!?\n":
+            return i
+    return -1
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body: bytes, ctype="application/json"):
         self.send_response(code)
@@ -139,8 +176,63 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_chat(body)
         elif self.path == "/tts":
             self._handle_tts(body)
+        elif self.path == "/converse":
+            self._handle_converse(body)
         else:
             self._send(404, b'{"error":"not found"}')
+
+    def _handle_converse(self, body: bytes):
+        """Stream LLM sentence-by-sentence; for each, emit a framed text chunk
+        then its TTS audio. Frame = [1 byte type 'T'/'A'][4-byte BE length][payload].
+        Client reads until the connection closes."""
+        text = body.decode("utf-8", "replace").strip()
+        sys.stderr.write(f"[converse] <- {text!r}\n")
+        if not text:
+            self._send(400, b'{"error":"empty text"}'); return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def frame(ftype: bytes, payload: bytes) -> bool:
+            try:
+                self.wfile.write(ftype)
+                self.wfile.write(struct.pack(">I", len(payload)))
+                self.wfile.write(payload)
+                self.wfile.flush()
+                return True
+            except Exception:
+                return False
+
+        def emit(sentence: str) -> bool:
+            s = _clean_ascii(sentence)
+            if not s:
+                return True
+            if not frame(b"T", s.encode("utf-8")):
+                return False
+            t0 = time.time()
+            pcm = tts(s)
+            sys.stderr.write(f"[converse]   '{s[:40]}...' -> {len(pcm)}B tts {time.time()-t0:.2f}s\n")
+            return frame(b"A", pcm)
+
+        try:
+            buf = ""; n = 0
+            for chunk in ollama_stream(text):
+                buf += chunk
+                while True:
+                    i = _next_boundary(buf)
+                    if i < 0:
+                        break
+                    sent, buf = buf[:i + 1], buf[i + 1:]
+                    if _clean_ascii(sent):
+                        if not emit(sent):
+                            raise IOError("client disconnected")
+                        n += 1
+            if _clean_ascii(buf):
+                emit(buf); n += 1
+            sys.stderr.write(f"[converse] -> {n} sentence(s) done\n")
+        except Exception as e:
+            sys.stderr.write(f"[converse] ERROR {e}\n")
 
     def _handle_tts(self, body: bytes):
         text = body.decode("utf-8", "replace").strip()

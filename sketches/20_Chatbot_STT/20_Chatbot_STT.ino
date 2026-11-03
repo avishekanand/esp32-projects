@@ -284,9 +284,10 @@ void touchInit() {
 
 // ---- Config ----
 #define SERVER_BASE  "http://192.168.86.134:8080"       // Mac dev server (LAN)
-#define SERVER_STT   SERVER_BASE "/stt"
-#define SERVER_CHAT  SERVER_BASE "/chat"
-#define SERVER_TTS   SERVER_BASE "/tts"
+#define SERVER_STT      SERVER_BASE "/stt"
+#define SERVER_CHAT     SERVER_BASE "/chat"
+#define SERVER_TTS      SERVER_BASE "/tts"
+#define SERVER_CONVERSE SERVER_BASE "/converse"   // streaming LLM+TTS (framed)
 #define AMP_ENABLE   1          // ES8311 amp enable (active LOW); keep OFF for mic
 // Mic I2S pins (verified in 05_Microphone_Record)
 #define I2S_MCLK 17
@@ -304,7 +305,7 @@ static const int BTN_X = 40, BTN_Y = 340, BTN_W = 240, BTN_H = 100;  // mults of
 AudioBoard codec(AudioDriverES8311, NoPins);
 I2SClass   i2s;
 
-enum State { ST_IDLE, ST_RECORDING, ST_UPLOADING, ST_THINKING, ST_SPEAKING, ST_RESULT };
+enum State { ST_IDLE, ST_RECORDING, ST_UPLOADING, ST_CONVERSE, ST_RESULT };
 State    state = ST_IDLE;
 uint8_t *pcm   = nullptr;        // PSRAM record buffer
 size_t   pcmLen = 0;
@@ -591,6 +592,89 @@ void speakReply(const String &text) {
   http.end();
 }
 
+// --- Streaming /converse: frame = [1B type 'T'/'A'][4B BE length][payload] ---
+// Read exactly n bytes from the stream (blocks with timeouts).
+static bool readExact(WiFiClient *st, uint8_t *buf, uint32_t n) {
+  uint32_t got = 0; unsigned long last = millis();
+  while (got < n) {
+    int a = st->available();
+    if (a > 0) {
+      int r = st->read(buf + got, (a < (int)(n - got)) ? a : (n - got));
+      if (r > 0) { got += r; last = millis(); }
+    } else {
+      if (!st->connected() && st->available() == 0) return false;
+      if (millis() - last > 8000) return false;
+      delay(1);
+    }
+  }
+  return true;
+}
+
+// Read `len` bytes of PCM16 mono, duplicate to stereo, stream to I2S.
+static bool playPcm(WiFiClient *st, uint32_t len) {
+  static uint8_t rb[1024]; static int16_t sb[512 * 2];
+  uint32_t got = 0;
+  while (got < len) {
+    uint32_t want = len - got; if (want > sizeof(rb)) want = sizeof(rb);
+    want &= ~1u;
+    if (want == 0) { uint8_t one; return readExact(st, &one, 1); }
+    if (!readExact(st, rb, want)) return false;
+    int samples = want / 2;
+    for (int i = 0; i < samples; i++) {
+      int16_t v = (int16_t)(rb[2 * i] | (rb[2 * i + 1] << 8));
+      sb[2 * i] = v; sb[2 * i + 1] = v;
+    }
+    i2s.write((uint8_t *)sb, samples * 4);
+    got += want;
+  }
+  return true;
+}
+
+// Full streaming turn: send user text, receive framed sentences (show + speak).
+void converseStream(const String &text) {
+  if (WiFi.status() != WL_CONNECTED) { replyText = "(wifi down)"; drawUI(); return; }
+  HTTPClient http;
+  http.begin(SERVER_CONVERSE);
+  http.addHeader("Content-Type", "text/plain");
+  http.setTimeout(60000);
+  int code = http.POST((uint8_t *)text.c_str(), text.length());
+  if (code != 200) { replyText = String("(server ") + code + ")"; http.end(); drawUI(); return; }
+
+  WiFiClient *st = http.getStreamPtr();
+  replyText = ""; replyScroll = 9999;
+  digitalWrite(AMP_ENABLE, LOW);               // amp ON for the whole turn
+  while (true) {
+    uint8_t hb[5];
+    if (!readExact(st, hb, 5)) break;          // type + 4-byte big-endian length
+    uint32_t len = ((uint32_t)hb[1] << 24) | ((uint32_t)hb[2] << 16) |
+                   ((uint32_t)hb[3] << 8) | hb[4];
+    if (hb[0] == 'T') {                         // sentence text -> show it
+      String s; s.reserve(len + 1);
+      uint8_t tmp[128]; uint32_t got = 0; bool ok = true;
+      while (got < len) {
+        uint32_t w = len - got; if (w > sizeof(tmp)) w = sizeof(tmp);
+        if (!(ok = readExact(st, tmp, w))) break;
+        for (uint32_t i = 0; i < w; i++) s += (char)tmp[i];
+        got += w;
+      }
+      if (!ok) break;
+      if (replyText.length()) replyText += " ";
+      replyText += s; replyScroll = 9999; drawUI();
+    } else if (hb[0] == 'A') {                  // sentence audio -> play it
+      if (!playPcm(st, len)) break;
+    } else {                                    // unknown frame -> skip
+      uint8_t junk[256]; uint32_t got = 0;
+      while (got < len) { uint32_t w = len - got; if (w > sizeof(junk)) w = sizeof(junk);
+        if (!readExact(st, junk, w)) break; got += w; }
+    }
+  }
+  delay(40);
+  digitalWrite(AMP_ENABLE, HIGH);              // amp OFF
+  http.end();
+  int maxScroll = g_replyLines > PIP_VISIBLE ? g_replyLines - PIP_VISIBLE : 0;
+  replyScroll = maxScroll;                      // leave scrolled to the end
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -672,8 +756,9 @@ void loop() {
       userText = postAudio();
       if (userText.length() && userText[0] != '(') {   // valid transcription
         status = "Pip is thinking...";
+        replyText = "";
         drawUI();                                       // show "You:" now
-        state = ST_THINKING;
+        state = ST_CONVERSE;
       } else {
         replyText = "(couldn't catch that - try again)";
         status = readyStatus();
@@ -682,16 +767,8 @@ void loop() {
       }
       break;
 
-    case ST_THINKING:
-      replyText = postChat(userText);
-      replyScroll = 0;
-      status = "Pip is speaking...";
-      state = ST_SPEAKING;
-      drawUI();                                 // show reply text before/while speaking
-      break;
-
-    case ST_SPEAKING:
-      speakReply(replyText);                     // blocks while audio streams out
+    case ST_CONVERSE:
+      converseStream(userText);                  // streams sentences: show + speak
       status = readyStatus();
       state = ST_RESULT;
       drawUI();
