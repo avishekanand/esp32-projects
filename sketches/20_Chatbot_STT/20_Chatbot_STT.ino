@@ -284,7 +284,7 @@ void touchInit() {
 // =============================================================================
 
 // ---- Config ----
-#define SERVER_BASE  "http://192.168.86.134:8080"       // Mac dev server (LAN)
+#define SERVER_BASE  "http://172.20.10.14:8080"          // Mac dev server (phone hotspot)
 #define SERVER_STT      SERVER_BASE "/stt"
 #define SERVER_CHAT     SERVER_BASE "/chat"
 #define SERVER_TTS      SERVER_BASE "/tts"
@@ -773,7 +773,9 @@ void setup() {
   codec.setInputVolume(75);     // mic gain
   prefs.begin("pip", false);    // persisted settings
   volume = prefs.getInt("vol", 50);
+  if (volume < 20) volume = 50; // safety: never boot muted/too quiet
   codec.setVolume(volume);      // speaker/DAC volume (restored)
+  Serial.printf("boot volume=%d\n", volume);
   i2s.setPins(I2S_BCLK, I2S_WS, I2S_DOUT, I2S_DIN, I2S_MCLK);
   if (!i2s.begin(I2S_MODE_STD, SR, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO))
     Serial.println("WARN: I2S init failed");
