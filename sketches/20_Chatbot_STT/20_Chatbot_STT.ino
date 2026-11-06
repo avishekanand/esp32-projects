@@ -26,6 +26,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ESP_I2S.h>
+#include <Preferences.h>
 #include "AudioBoard.h"
 #include "wifi_secrets.h"
 
@@ -300,8 +301,10 @@ static const int MAX_SEC = 10;          // cap recording length
 static const size_t MAX_PCM = (size_t)SR * 2 * MAX_SEC;  // mono int16 bytes (~480KB)
 
 // ---- UI geometry ----
-static const int BTN_X = 40, BTN_Y = 340, BTN_W = 240, BTN_H = 100;  // mults of 4
+static const int BTN_X = 24, BTN_Y = 340, BTN_W = 196, BTN_H = 100;  // TAP TO TALK
 static const int NB_X = 232, NB_Y = 16, NB_W = 76, NB_H = 36;        // "New" (reset) button
+static const int VUP_X = 232, VUP_Y = 340, VUP_W = 76, VUP_H = 48;   // Vol +
+static const int VDN_X = 232, VDN_Y = 392, VDN_W = 76, VDN_H = 48;   // Vol -
 
 AudioBoard codec(AudioDriverES8311, NoPins);
 I2SClass   i2s;
@@ -322,6 +325,10 @@ float    tSttS = 0, tFirstS = 0, tTotalS = 0;   // stt, time-to-first-audio, tot
 bool     haveTiming = false;
 bool     g_touchDown  = false;   // shared per-loop touch sample
 uint16_t g_tx = 0, g_ty = 0;
+bool     g_tapEvent = false;     // rising-edge tap this loop
+uint16_t g_tapX = 0, g_tapY = 0;
+int      volume = 50;            // speaker volume 0..100 (persisted)
+Preferences prefs;
 
 // Pip (reply) box geometry — shared by the drawer and the scroll handler
 #define  TXT_SIZE 2
@@ -340,6 +347,12 @@ static bool inButton(uint16_t x, uint16_t y) {
 }
 static bool inNewBtn(uint16_t x, uint16_t y) {
   return x >= NB_X && x < NB_X + NB_W && y >= NB_Y && y < NB_Y + NB_H;
+}
+static bool inVolUp(uint16_t x, uint16_t y) {
+  return x >= VUP_X && x < VUP_X + VUP_W && y >= VUP_Y && y < VUP_Y + VUP_H;
+}
+static bool inVolDn(uint16_t x, uint16_t y) {
+  return x >= VDN_X && x < VDN_X + VDN_W && y >= VDN_Y && y < VDN_Y + VDN_H;
 }
 
 // Word-wrap `txt` into g_lines[] at `maxChars` per line; returns line count.
@@ -452,9 +465,16 @@ void drawUI() {
   gfx->setTextSize(3);
   const char *label = (state == ST_RECORDING) ? "TAP TO STOP"
                     : idle ? "TAP TO TALK" : "...";
-  int16_t tx = BTN_X + 20, ty = BTN_Y + 36;
+  int16_t tx = BTN_X + 16, ty = BTN_Y + 36;
   gfx->setCursor(tx, ty);
   gfx->println(label);
+
+  // Volume +/- buttons (right column); current level shows in the status line.
+  gfx->fillRoundRect(VUP_X, VUP_Y, VUP_W, VUP_H, 10, RGB565_DARKGREY);
+  gfx->fillRoundRect(VDN_X, VDN_Y, VDN_W, VDN_H, 10, RGB565_DARKGREY);
+  gfx->setTextColor(BLACK); gfx->setTextSize(3);
+  gfx->setCursor(VUP_X + VUP_W / 2 - 8, VUP_Y + 15); gfx->print("+");
+  gfx->setCursor(VDN_X + VDN_W / 2 - 8, VDN_Y + 15); gfx->print("-");
 
   // Timing readout (measured from when you stop talking)
   if (haveTiming) {
@@ -470,15 +490,22 @@ void drawUI() {
   gfx->flush();
 }
 
-// Sample the touch panel once per loop into shared globals.
-void pollTouch() { g_touchDown = touchRead(&g_tx, &g_ty); }
-
-// Edge-detected tap on the "New" button.
-bool newChatTapped() {
+// Sample the touch panel once per loop; detect a rising-edge tap into g_tap*.
+void pollTouch() {
   static bool wasDown = false;
-  bool tap = (g_touchDown && !wasDown && inNewBtn(g_tx, g_ty));
+  g_touchDown = touchRead(&g_tx, &g_ty);
+  g_tapEvent = (g_touchDown && !wasDown);
+  if (g_tapEvent) { g_tapX = g_tx; g_tapY = g_ty; }
   wasDown = g_touchDown;
-  return tap;
+}
+
+void applyVolume() { codec.setVolume(volume); prefs.putInt("vol", volume); }
+
+void changeVolume(int d) {
+  volume += d; if (volume < 0) volume = 0; if (volume > 100) volume = 100;
+  applyVolume();
+  status = String("Volume ") + volume + "%";
+  drawUI();
 }
 
 // Clear the server conversation history and reset the UI to a fresh start.
@@ -491,13 +518,8 @@ void resetConversation() {
   replyScroll = 0; haveTiming = false;
 }
 
-// Edge-detected tap inside the button. Returns true once per press.
-bool buttonTapped() {
-  static bool wasDown = false;
-  bool tap = (g_touchDown && !wasDown && inButton(g_tx, g_ty));
-  wasDown = g_touchDown;
-  return tap;
-}
+// True once per press if the tap landed on the main TAP-TO-TALK button.
+bool buttonTapped() { return g_tapEvent && inButton(g_tapX, g_tapY); }
 
 // Drag anywhere above the button scrolls Pip's reply. Call every loop in ST_RESULT.
 void handleReplyScroll() {
@@ -749,7 +771,9 @@ void setup() {
   cfg.i2s.rate = RATE_24K;               // 24 kHz codec clocking
   if (!codec.begin(cfg)) Serial.println("WARN: ES8311 init failed");
   codec.setInputVolume(75);     // mic gain
-  codec.setVolume(50);          // speaker/DAC volume (calibrated level)
+  prefs.begin("pip", false);    // persisted settings
+  volume = prefs.getInt("vol", 50);
+  codec.setVolume(volume);      // speaker/DAC volume (restored)
   i2s.setPins(I2S_BCLK, I2S_WS, I2S_DOUT, I2S_DIN, I2S_MCLK);
   if (!i2s.begin(I2S_MODE_STD, SR, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO))
     Serial.println("WARN: I2S init failed");
@@ -782,12 +806,10 @@ static String readyStatus() {
 
 void loop() {
   pollTouch();
-  bool newTap = newChatTapped();                // call every loop to keep edge state
-  if (newTap && (state == ST_IDLE || state == ST_RESULT)) {
-    resetConversation();
-    status = readyStatus();
-    drawUI();
-    return;
+  if (g_tapEvent && (state == ST_IDLE || state == ST_RESULT)) {  // top-bar / side controls
+    if (inNewBtn(g_tapX, g_tapY)) { resetConversation(); status = readyStatus(); drawUI(); return; }
+    if (inVolUp(g_tapX, g_tapY)) { changeVolume(+10); return; }
+    if (inVolDn(g_tapX, g_tapY)) { changeVolume(-10); return; }
   }
   switch (state) {
     case ST_IDLE:
